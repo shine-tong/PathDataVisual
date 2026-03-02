@@ -1,6 +1,9 @@
 ﻿# PathDataVisual
 
-A 6-axis robot trajectory data visualization toolkit built with `matplotlib`, including:
+A 6-axis robot trajectory visualization toolkit built with `matplotlib`.
+
+It provides:
+
 - Static curve export (PNG)
 - Animated curve export (GIF)
 - Single-window interactive player
@@ -13,9 +16,9 @@ PathDataVisual/
 │  ├─ message.json
 │  └─ message_ros_sample.json
 ├─ scripts/
-│  ├─ plot_six_axis.py       # static plots (4 signal types)
-│  ├─ animate_six_axis.py    # animated GIFs (4 signal types)
-│  └─ player_six_axis.py     # single-window interactive player (signal/unit switching)
+│  ├─ plot_six_axis.py
+│  ├─ animate_six_axis.py
+│  └─ player_six_axis.py
 ├─ outputs/
 │  ├─ PNG/
 │  │  ├─ position/
@@ -33,15 +36,18 @@ PathDataVisual/
 ## 2. Input Data Format
 
 Required fields in input JSON:
+
 - `positions`: `N x 6` joint position data
-- `flags`: stage labels of length `N` (aligned with `positions`)
+- `flags`: stage labels with length `N` (aligned with `positions`)
 
 Optional fields (used directly if present):
+
 - `velocities`
 - `accelerations`
 - `effort` (or compatible alias `effot`)
 
-If optional fields are missing, scripts derive fallback data from `positions` using `--dt`.
+If optional fields are missing,
+scripts derive fallback data from `positions` with `--dt`.
 
 ## 3. Requirements
 
@@ -64,16 +70,20 @@ python scripts/plot_six_axis.py \
 ```
 
 Arguments:
+
 - `--input`: input JSON path
-- `--output`: base output path (default: `outputs/PNG/position/manipulator_positions.png`)
-- `--signal`: `position|velocity|acceleration|effort|all` (default: `all`)
-- `--unit`: `rad|deg|both` (default: `both`; `effort` is always `Nm`)
-- `--dt`: sampling interval for derivative fallback (default: `0.04`)
-- `--show`: display plot window
+- `--output`: base output path
+  default: `outputs/PNG/position/manipulator_positions.png`
+- `--signal`: `position|velocity|acceleration|effort|all`
+- `--unit`: `rad|deg|both`
+  `effort` always stays in `Nm`
+- `--dt`: sampling interval for fallback derivatives (`0.04`)
+- `--show`: display figure window
 
 Output rules:
-- Files are written into `outputs/PNG/<signal>/`
-- Degree versions append `_deg` to file names
+
+- Files are written to `outputs/PNG/<signal>/`
+- Degree versions append `_deg`
 
 ## 5. Animation Script (GIF)
 
@@ -86,43 +96,58 @@ python scripts/animate_six_axis.py \
 ```
 
 Arguments:
+
 - `--input`: input JSON path
-- `--output`: base output path (default: `outputs/GIF/position/manipulator_animation.gif`)
+- `--output`: base output path
+  default: `outputs/GIF/position/manipulator_animation.gif`
 - `--signal`: `position|velocity|acceleration|effort|all`
-- `--unit`: `rad|deg|both` (`effort` remains `Nm`)
-- `--fps`: frame rate (default: `20`)
-- `--dt`: sampling interval for derivative fallback (default: `0.04`)
+- `--unit`: `rad|deg|both`
+  `effort` always stays in `Nm`
+- `--fps`: frame rate (default `20`)
+- `--dt`: sampling interval for fallback derivatives (`0.04`)
 
 Output rules:
-- Files are written into `outputs/GIF/<signal>/`
-- Degree versions append `_deg` to file names
+
+- Files are written to `outputs/GIF/<signal>/`
+- Degree versions append `_deg`
 
 ## 6. Interactive Player (Single Window)
 
 ```bash
-python scripts/player_six_axis.py --input data/message_ros_sample.json --unit rad --fps 20
+python scripts/player_six_axis.py \
+  --input data/message_ros_sample.json \
+  --unit rad \
+  --fps 20
 ```
 
 Arguments:
+
 - `--input`: input JSON path
 - `--unit`: initial angular unit `rad|deg`
 - `--fps`: playback speed
-- `--dt`: sampling interval for derivative fallback
+- `--dt`: sampling interval for fallback derivatives
 
 Interactive features:
-- `Play/Pause` button for auto-play
-- Drag the vertical cursor to inspect points
+
+- `Play/Pause` for auto-play
+- Drag the vertical cursor for manual inspection
 - `Index` slider for precise navigation
-- Signal buttons: `Position / Velocity / Accel / Effort`
-- Unit toggle button: `Unit: rad/deg` (`effort` stays in `Nm`)
+- Signal switch: `Position / Velocity / Accel / Effort`
+- Unit switch: `Unit: rad/deg`
+  `effort` remains in `Nm`
 
 ## 7. FAQ
 
 ### 7.1 Only position output is generated
+
 Use `--signal all` to generate all signal types.
 
-### 7.2 Why does the curve shape look the same after switching rad/deg?
-This is expected. Unit switching is linear scaling (`* 180/pi`), so shape stays the same while y-values change.
+### 7.2 Why does the curve shape stay the same in rad/deg?
+
+This is expected. Unit switching is linear scaling (`* 180/pi`).
+The curve shape stays the same while y-values change.
 
 ### 7.3 Interactive window does not open
-`player_six_axis.py` requires a desktop GUI environment and will not display in headless-only environments.
+
+`player_six_axis.py` requires a desktop GUI environment.
+It will not display in headless-only environments.

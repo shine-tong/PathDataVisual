@@ -31,5 +31,6 @@ jobs:
             --no-progress
             --accept 200,429
             README.md README_EN.md
+          failIfEmpty: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
