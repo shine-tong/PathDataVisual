@@ -1,0 +1,48 @@
+﻿name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.8", "3.10", "3.12"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Compile check
+        run: |
+          python -m py_compile scripts/plot_six_axis.py
+          python -m py_compile scripts/animate_six_axis.py
+          python -m py_compile scripts/player_six_axis.py
+
+      - name: Smoke test - static plots
+        run: |
+          python scripts/plot_six_axis.py \
+            --input data/message_ros_sample.json \
+            --signal all \
+            --unit both
+
+      - name: Smoke test - animation
+        run: |
+          python scripts/animate_six_axis.py \
+            --input data/message_ros_sample.json \
+            --signal position \
+            --unit rad \
+            --fps 5
