@@ -4,11 +4,12 @@
 - Play/Pause 自动播放竖线
 - 鼠标拖动竖线或使用滑块手动查看点位
 - 按钮切换信号: Position / Velocity / Acceleration / Effort
-- 按钮切换单位: rad / deg(effort 固定 Nm)
+- 按钮切换单位: rad / deg (角度) 与 m / mm (TCP 的 XYZ)
+- 单窗口可切换数据源: Joint / TCP
 
 示例：
-  python scripts/player_six_axis.py --input data/message_ros_sample.json
-  python scripts/player_six_axis.py --input data/message.json --unit deg
+  python scripts/player_six_axis.py --input data/message.json
+  python scripts/player_six_axis.py --joint-input data/message.json --tcp-input data/message_tcp.json
 """
 
 import argparse
@@ -23,6 +24,9 @@ from matplotlib.widgets import Button, Slider
 
 ANGULAR_SIGNALS = {"position", "velocity", "acceleration"}
 SIGNALS = ["position", "velocity", "acceleration", "effort"]
+TCP_COMPAT_SIGNALS = {"position", "velocity", "acceleration"}
+JOINT_AXIS_LABELS = ["Axis 1", "Axis 2", "Axis 3", "Axis 4", "Axis 5", "Axis 6"]
+TCP_AXIS_LABELS = ["X", "Y", "Z", "A", "B", "C"]
 
 
 def load_trajectory(file_path):
@@ -95,6 +99,16 @@ def ensure_effort(positions, velocities, accelerations):
     return effort
 
 
+def detect_data_kind(input_path, user_choice):
+    if user_choice != "auto":
+        return user_choice
+    return "tcp" if "tcp" in Path(input_path).stem.lower() else "joint"
+
+
+def axis_labels(data_kind):
+    return TCP_AXIS_LABELS if data_kind == "tcp" else JOINT_AXIS_LABELS
+
+
 def prepare_signals(data, dt):
     positions = data["positions"]
     velocities = data.get("velocities") or derivative(positions, dt)
@@ -105,21 +119,12 @@ def prepare_signals(data, dt):
     if effort is None:
         effort = ensure_effort(positions, velocities, accelerations)
 
-    signal_data_rad = {
+    return {
         "position": positions,
         "velocity": velocities,
         "acceleration": accelerations,
         "effort": effort,
     }
-
-    signal_data_deg = {
-        "position": [[math.degrees(v) for v in row] for row in positions],
-        "velocity": [[math.degrees(v) for v in row] for row in velocities],
-        "acceleration": [[math.degrees(v) for v in row] for row in accelerations],
-        "effort": effort,
-    }
-
-    return {"rad": signal_data_rad, "deg": signal_data_deg}
 
 
 def signal_title(signal):
@@ -132,7 +137,39 @@ def signal_title(signal):
     return "Effort"
 
 
-def signal_unit(signal, unit):
+def convert_unit(matrix, signal, unit, data_kind, linear_unit):
+    if signal not in ANGULAR_SIGNALS:
+        return matrix
+    if data_kind != "tcp":
+        if unit == "rad":
+            return matrix
+        return [[math.degrees(v) for v in row] for row in matrix]
+
+    converted = []
+    for row in matrix:
+        xyz = row[:3]
+        abc = row[3:]
+        if linear_unit == "mm":
+            xyz = [v * 1000.0 for v in xyz]
+        if unit == "deg":
+            abc = [math.degrees(v) for v in abc]
+        converted.append(xyz + abc)
+    return converted
+
+
+def signal_unit(signal, unit, data_kind="joint", linear_unit="m"):
+    if data_kind == "tcp" and signal in TCP_COMPAT_SIGNALS:
+        if signal == "position":
+            return "XYZ {}, ABC {}".format(linear_unit, "deg" if unit == "deg" else "rad")
+        if signal == "velocity":
+            linear = "{}/s".format(linear_unit)
+            angular = "deg/s" if unit == "deg" else "rad/s"
+            return "XYZ {}, ABC {}".format(linear, angular)
+        if signal == "acceleration":
+            linear = "{}/s^2".format(linear_unit)
+            angular = "deg/s^2" if unit == "deg" else "rad/s^2"
+            return "XYZ {}, ABC {}".format(linear, angular)
+
     if signal == "position":
         return "deg" if unit == "deg" else "rad"
     if signal == "velocity":
@@ -142,31 +179,29 @@ def signal_unit(signal, unit):
     return "Nm"
 
 
-def build_interactive_player(data, unit, fps, dt):
-    flags = data["flags"]
-    signal_data_by_unit = prepare_signals(data, dt)
-    sample_count = len(data["positions"])
+def get_signal_series(raw_signal_data, signal, unit, data_kind, linear_unit):
+    matrix = convert_unit(raw_signal_data[signal], signal, unit, data_kind, linear_unit)
+    return list(zip(*matrix))
 
-    # per signal -> list of 6 series
-    signal_series_by_unit = {
-        "rad": {k: list(zip(*v)) for k, v in signal_data_by_unit["rad"].items()},
-        "deg": {k: list(zip(*v)) for k, v in signal_data_by_unit["deg"].items()},
+
+def build_data_source(data, data_kind, dt):
+    return {
+        "raw_signal_data": prepare_signals(data, dt),
+        "flags": data["flags"],
+        "sample_count": len(data["positions"]),
+        "data_kind": data_kind,
     }
 
-    flag_ranges = get_flag_ranges(flags)
-    start_indices = [i for i, f in enumerate(flags) if f == "start"]
-    end_indices = [i for i, f in enumerate(flags) if f == "end"]
+
+def build_interactive_player(data_sources, initial_source, unit, linear_unit, fps):
+    source_names = list(data_sources.keys())
+    if initial_source not in data_sources:
+        initial_source = source_names[0]
 
     fig, axes = plt.subplots(2, 3, figsize=(16, 9), sharex=True)
     axes = axes.flatten()
     ax_list = list(axes)
     plt.subplots_adjust(bottom=0.18, right=0.88)
-
-    color_map = {}
-    cmap = plt.get_cmap("tab10")
-    for idx, (flag, _, _) in enumerate(flag_ranges):
-        if flag not in color_map:
-            color_map[flag] = cmap(idx % 10)
 
     lines = []
     vlines = []
@@ -174,39 +209,22 @@ def build_interactive_player(data, unit, fps, dt):
     value_texts = []
     start_scatters = []
     end_scatters = []
+    overlay_artists = [[] for _ in range(6)]
 
     initial_signal = "position"
 
+    init_src = data_sources[initial_source]
+    init_series_list = get_signal_series(init_src["raw_signal_data"], initial_signal, unit, init_src["data_kind"], linear_unit)
+
     for axis_idx in range(6):
         ax = axes[axis_idx]
-        series = signal_series_by_unit[unit][initial_signal][axis_idx]
+        series = init_series_list[axis_idx]
 
-        line, = ax.plot(range(sample_count), series, linewidth=1.6, color="#1f77b4")
-
-        for flag, start, end in flag_ranges:
-            ax.axvspan(start - 0.5, end + 0.5, color=color_map[flag], alpha=0.12)
-
-        text_transform = mtransforms.blended_transform_factory(ax.transData, ax.transAxes)
-        for flag, start, end in flag_ranges:
-            if flag not in ("start", "end"):
-                mid = (start + end) / 2.0
-                ax.text(mid, 0.97, flag, transform=text_transform, ha="center", va="top", fontsize=8)
-
-        if start_indices:
-            y_start = [series[i] for i in start_indices]
-            start_sc = ax.scatter(start_indices, y_start, color="green", s=32, zorder=4)
-        else:
-            start_sc = ax.scatter([], [], color="green", s=32, zorder=4)
-
-        if end_indices:
-            y_end = [series[i] for i in end_indices]
-            end_sc = ax.scatter(end_indices, y_end, color="red", s=32, zorder=4)
-        else:
-            end_sc = ax.scatter([], [], color="red", s=32, zorder=4)
+        line, = ax.plot(range(len(series)), series, linewidth=1.6, color="#1f77b4")
 
         vline = ax.axvline(0, color="black", linestyle="--", linewidth=1.5, alpha=0.9, zorder=5)
         marker, = ax.plot([0], [series[0]], marker="o", color="black", markersize=4, zorder=6)
-        unit_label = signal_unit(initial_signal, unit)
+        unit_label = signal_unit(initial_signal, unit, data_kind=init_src["data_kind"], linear_unit=linear_unit)
         value_text = ax.text(
             0.02,
             0.05,
@@ -216,6 +234,9 @@ def build_interactive_player(data, unit, fps, dt):
             bbox={"facecolor": "white", "alpha": 0.75, "edgecolor": "none"},
         )
 
+        start_sc = ax.scatter([], [], color="green", s=32, zorder=4)
+        end_sc = ax.scatter([], [], color="red", s=32, zorder=4)
+
         lines.append(line)
         start_scatters.append(start_sc)
         end_scatters.append(end_sc)
@@ -223,7 +244,6 @@ def build_interactive_player(data, unit, fps, dt):
         point_markers.append(marker)
         value_texts.append(value_text)
 
-        ax.set_title("Axis {}".format(axis_idx + 1))
         ax.grid(True, alpha=0.3)
 
     axes[3].set_xlabel("Point Index")
@@ -233,19 +253,29 @@ def build_interactive_player(data, unit, fps, dt):
     status_text = fig.text(0.02, 0.02, "", fontsize=10)
 
     slider_ax = fig.add_axes([0.15, 0.07, 0.52, 0.03])
-    slider = Slider(slider_ax, "Index", 0, sample_count - 1, valinit=0, valstep=1)
+    initial_count = init_src["sample_count"]
+    slider = Slider(slider_ax, "Index", 0, max(initial_count - 1, 0), valinit=0, valstep=1)
 
-    play_ax = fig.add_axes([0.69, 0.055, 0.10, 0.05])
+    play_ax = fig.add_axes([0.73, 0.055, 0.10, 0.05])
     play_button = Button(play_ax, "Play")
-    unit_ax = fig.add_axes([0.80, 0.055, 0.10, 0.05])
+
+    unit_ax = fig.add_axes([0.89, 0.055, 0.10, 0.05])
     unit_button = Button(unit_ax, "Unit: {}".format(unit))
 
-    # Signal switch buttons (single window)
+    linear_ax = fig.add_axes([0.89, 0.115, 0.10, 0.05])
+    linear_button = Button(linear_ax, "XYZ: {}".format(linear_unit))
+
+    source_button = None
+    if len(source_names) > 1:
+        source_ax = fig.add_axes([0.89, 0.175, 0.10, 0.05])
+        source_button = Button(source_ax, "Data: {}".format(initial_source))
+
+    # Signal switch buttons
     btn_axes = {
-        "position": fig.add_axes([0.89, 0.76, 0.10, 0.06]),
-        "velocity": fig.add_axes([0.89, 0.68, 0.10, 0.06]),
-        "acceleration": fig.add_axes([0.89, 0.60, 0.10, 0.06]),
-        "effort": fig.add_axes([0.89, 0.52, 0.10, 0.06]),
+        "position": fig.add_axes([0.89, 0.82, 0.10, 0.06]),
+        "velocity": fig.add_axes([0.89, 0.74, 0.10, 0.06]),
+        "acceleration": fig.add_axes([0.89, 0.66, 0.10, 0.06]),
+        "effort": fig.add_axes([0.89, 0.58, 0.10, 0.06]),
     }
     signal_buttons = {
         "position": Button(btn_axes["position"], "Position"),
@@ -261,20 +291,124 @@ def build_interactive_player(data, unit, fps, dt):
         "updating_slider": False,
         "signal": initial_signal,
         "unit": unit,
+        "linear_unit": linear_unit,
+        "source": initial_source,
     }
+
+    def current_source_data():
+        return data_sources[state["source"]]
+
+    def source_kind():
+        return current_source_data()["data_kind"]
+
+    def clear_overlay_for_axis(i):
+        for art in overlay_artists[i]:
+            try:
+                art.remove()
+            except ValueError:
+                pass
+        overlay_artists[i] = []
+
+    def draw_source_overlays():
+        src = current_source_data()
+        flags = src["flags"]
+        flag_ranges = get_flag_ranges(flags)
+
+        color_map = {}
+        cmap = plt.get_cmap("tab10")
+        for idx, (flag, _, _) in enumerate(flag_ranges):
+            if flag not in color_map:
+                color_map[flag] = cmap(idx % 10)
+
+        for i, ax in enumerate(axes):
+            clear_overlay_for_axis(i)
+            text_transform = mtransforms.blended_transform_factory(ax.transData, ax.transAxes)
+            for flag, start, end in flag_ranges:
+                span = ax.axvspan(start - 0.5, end + 0.5, color=color_map[flag], alpha=0.12, zorder=0)
+                overlay_artists[i].append(span)
+            for flag, start, end in flag_ranges:
+                if flag not in ("start", "end"):
+                    mid = (start + end) / 2.0
+                    txt = ax.text(mid, 0.97, flag, transform=text_transform, ha="center", va="top", fontsize=8)
+                    overlay_artists[i].append(txt)
+
+    def clamp_idx(x):
+        src = current_source_data()
+        sample_count = src["sample_count"]
+        if x is None:
+            return 0
+        idx = int(round(x))
+        if idx < 0:
+            return 0
+        if idx >= sample_count:
+            return sample_count - 1
+        return idx
+
+    def update_slider_range(sample_count):
+        max_idx = max(sample_count - 1, 0)
+        slider.valmin = 0
+        slider.valmax = max_idx
+        slider.ax.set_xlim(slider.valmin, slider.valmax)
+
+    def set_frame(idx, from_slider=False):
+        src = current_source_data()
+        flags = src["flags"]
+        series_list = get_signal_series(
+            src["raw_signal_data"],
+            state["signal"],
+            state["unit"],
+            src["data_kind"],
+            state["linear_unit"],
+        )
+        idx = clamp_idx(idx)
+        state["idx"] = idx
+
+        u = signal_unit(state["signal"], state["unit"], data_kind=src["data_kind"], linear_unit=state["linear_unit"])
+
+        for i, series in enumerate(series_list):
+            y = series[idx]
+            vlines[i].set_xdata([idx, idx])
+            point_markers[i].set_data([idx], [y])
+            value_texts[i].set_text("Axis {} = {:.4f} {}".format(i + 1, y, u))
+
+        stage = flags[idx] if 0 <= idx < len(flags) else "N/A"
+        status_text.set_text("Data: {} | Signal: {} | Index: {} | Stage: {}".format(state["source"], state["signal"], idx, stage))
+
+        if not from_slider:
+            state["updating_slider"] = True
+            slider.set_val(idx)
+            state["updating_slider"] = False
+
+        fig.canvas.draw_idle()
 
     def apply_signal(signal):
         state["signal"] = signal
-        current_unit = state["unit"]
-        series_list = signal_series_by_unit[current_unit][signal]
-        u = signal_unit(signal, current_unit)
+        src = current_source_data()
+        flags = src["flags"]
+        start_indices = [i for i, f in enumerate(flags) if f == "start"]
+        end_indices = [i for i, f in enumerate(flags) if f == "end"]
+
+        series_list = get_signal_series(
+            src["raw_signal_data"],
+            signal,
+            state["unit"],
+            src["data_kind"],
+            state["linear_unit"],
+        )
+
+        labels = axis_labels(src["data_kind"])
+        u = signal_unit(signal, state["unit"], data_kind=src["data_kind"], linear_unit=state["linear_unit"])
         y_label = "{} ({})".format(signal_title(signal), u)
         axes[0].set_ylabel(y_label)
         axes[3].set_ylabel(y_label)
-        fig.suptitle("Manipulator Interactive Player: {} ({})".format(signal_title(signal), u))
+
+        title_prefix = "TCP Pose" if src["data_kind"] == "tcp" else "Manipulator"
+        fig.suptitle("{} Interactive Player: {} ({})".format(title_prefix, signal_title(signal), u))
 
         for i, series in enumerate(series_list):
-            lines[i].set_data(range(sample_count), series)
+            lines[i].set_data(range(len(series)), series)
+            axes[i].set_title(labels[i])
+            axes[i].set_xlim(-0.5, len(series) - 0.5)
 
             if start_indices:
                 start_offsets = np.column_stack((start_indices, [series[idx] for idx in start_indices]))
@@ -288,54 +422,17 @@ def build_interactive_player(data, unit, fps, dt):
             else:
                 end_scatters[i].set_offsets(np.empty((0, 2)))
 
-            ax = axes[i]
-            # Explicitly reset y-limits from current signal/unit data to avoid
-            # stale autoscale state when toggling between deg and rad.
             ymin = min(series)
             ymax = max(series)
             if ymax == ymin:
                 pad = max(abs(ymax) * 0.05, 1e-6)
             else:
                 pad = (ymax - ymin) * 0.08
-            ax.set_ylim(ymin - pad, ymax + pad)
+            axes[i].set_ylim(ymin - pad, ymax + pad)
 
+        update_slider_range(src["sample_count"])
+        draw_source_overlays()
         set_frame(state["idx"], from_slider=False)
-
-    def clamp_idx(x):
-        if x is None:
-            return None
-        idx = int(round(x))
-        if idx < 0:
-            return 0
-        if idx >= sample_count:
-            return sample_count - 1
-        return idx
-
-    def set_frame(idx, from_slider=False):
-        idx = clamp_idx(idx)
-        if idx is None:
-            return
-
-        state["idx"] = idx
-        signal = state["signal"]
-        current_unit = state["unit"]
-        series_list = signal_series_by_unit[current_unit][signal]
-        u = signal_unit(signal, current_unit)
-
-        for i, series in enumerate(series_list):
-            y = series[idx]
-            vlines[i].set_xdata([idx, idx])
-            point_markers[i].set_data([idx], [y])
-            value_texts[i].set_text("Axis {} = {:.4f} {}".format(i + 1, y, u))
-
-        status_text.set_text("Signal: {} | Index: {} | Stage: {}".format(signal, idx, flags[idx]))
-
-        if not from_slider:
-            state["updating_slider"] = True
-            slider.set_val(idx)
-            state["updating_slider"] = False
-
-        fig.canvas.draw_idle()
 
     def on_slider_change(val):
         if state["updating_slider"]:
@@ -352,9 +449,26 @@ def build_interactive_player(data, unit, fps, dt):
         unit_button.label.set_text("Unit: {}".format(state["unit"]))
         apply_signal(state["signal"])
 
+    def on_toggle_linear(_event):
+        state["linear_unit"] = "mm" if state["linear_unit"] == "m" else "m"
+        linear_button.label.set_text("XYZ: {}".format(state["linear_unit"]))
+        apply_signal(state["signal"])
+
+    def on_toggle_source(_event):
+        if len(source_names) <= 1:
+            return
+        cur = state["source"]
+        idx = source_names.index(cur)
+        state["source"] = source_names[(idx + 1) % len(source_names)]
+        if source_button is not None:
+            source_button.label.set_text("Data: {}".format(state["source"]))
+        apply_signal(state["signal"])
+
     def on_timer():
         if not state["playing"]:
             return
+        src = current_source_data()
+        sample_count = src["sample_count"]
         set_frame((state["idx"] + 1) % sample_count)
 
     def on_press(event):
@@ -379,6 +493,10 @@ def build_interactive_player(data, unit, fps, dt):
     slider.on_changed(on_slider_change)
     play_button.on_clicked(on_toggle_play)
     unit_button.on_clicked(on_toggle_unit)
+    linear_button.on_clicked(on_toggle_linear)
+    if source_button is not None:
+        source_button.on_clicked(on_toggle_source)
+
     signal_buttons["position"].on_clicked(lambda _e: apply_signal("position"))
     signal_buttons["velocity"].on_clicked(lambda _e: apply_signal("velocity"))
     signal_buttons["acceleration"].on_clicked(lambda _e: apply_signal("acceleration"))
@@ -398,18 +516,47 @@ def build_interactive_player(data, unit, fps, dt):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--input", default="data/message.json", help="input JSON path")
+    parser.add_argument("--input", default="data/message.json", help="single input JSON path (legacy mode)")
+    parser.add_argument("--joint-input", default=None, help="joint JSON path for all-in-one mode")
+    parser.add_argument("--tcp-input", default=None, help="tcp JSON path for all-in-one mode")
+    parser.add_argument("--source", choices=["joint", "tcp"], default="joint", help="initial source in all-in-one mode")
+    parser.add_argument("--data-type", choices=["auto", "joint", "tcp"], default="auto", help="single input semantics")
     parser.add_argument("--unit", choices=["rad", "deg"], default="rad", help="angular unit for position/velocity/acceleration")
+    parser.add_argument("--linear-unit", choices=["m", "mm"], default="m", help="linear unit for TCP XYZ")
     parser.add_argument("--fps", type=int, default=20, help="playback frame rate")
     parser.add_argument("--dt", type=float, default=0.04, help="sampling interval for derivative fallback")
     args = parser.parse_args()
 
-    input_path = Path(args.input)
-    if not input_path.exists():
-        raise FileNotFoundError("file not found: {}".format(input_path))
+    data_sources = {}
 
-    data = load_trajectory(input_path)
-    build_interactive_player(data, args.unit, args.fps, args.dt)
+    if args.joint_input or args.tcp_input:
+        if not args.joint_input or not args.tcp_input:
+            raise ValueError("all-in-one mode requires both --joint-input and --tcp-input")
+
+        joint_path = Path(args.joint_input)
+        tcp_path = Path(args.tcp_input)
+        if not joint_path.exists():
+            raise FileNotFoundError("file not found: {}".format(joint_path))
+        if not tcp_path.exists():
+            raise FileNotFoundError("file not found: {}".format(tcp_path))
+
+        joint_data = load_trajectory(joint_path)
+        tcp_data = load_trajectory(tcp_path)
+        data_sources["joint"] = build_data_source(joint_data, "joint", args.dt)
+        data_sources["tcp"] = build_data_source(tcp_data, "tcp", args.dt)
+        initial_source = args.source
+    else:
+        input_path = Path(args.input)
+        if not input_path.exists():
+            raise FileNotFoundError("file not found: {}".format(input_path))
+
+        data = load_trajectory(input_path)
+        data_kind = detect_data_kind(input_path, args.data_type)
+        src_name = "tcp" if data_kind == "tcp" else "joint"
+        data_sources[src_name] = build_data_source(data, data_kind, args.dt)
+        initial_source = src_name
+
+    build_interactive_player(data_sources, initial_source, args.unit, args.linear_unit, args.fps)
 
 
 if __name__ == "__main__":

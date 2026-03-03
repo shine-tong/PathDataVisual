@@ -32,6 +32,9 @@ TAB10_HEX = [
     "#17becf",
 ]
 ANGULAR_SIGNALS = {"position", "velocity", "acceleration"}
+TCP_COMPAT_SIGNALS = {"position", "velocity", "acceleration"}
+JOINT_AXIS_LABELS = ["Axis 1", "Axis 2", "Axis 3", "Axis 4", "Axis 5", "Axis 6"]
+TCP_AXIS_LABELS = ["X", "Y", "Z", "A", "B", "C"]
 
 
 def load_trajectory(file_path):
@@ -130,13 +133,49 @@ def resolve_signal_matrix(data, signal, dt):
     raise ValueError("unsupported signal: {}".format(signal))
 
 
-def convert_unit(matrix, signal, unit):
-    if signal not in ANGULAR_SIGNALS or unit == "rad":
+def detect_data_kind(input_path, user_choice):
+    if user_choice != "auto":
+        return user_choice
+    return "tcp" if "tcp" in Path(input_path).stem.lower() else "joint"
+
+
+def axis_labels(data_kind):
+    return TCP_AXIS_LABELS if data_kind == "tcp" else JOINT_AXIS_LABELS
+
+
+def convert_unit(matrix, signal, unit, data_kind, linear_unit):
+    if signal not in ANGULAR_SIGNALS:
         return matrix
-    return [[math.degrees(v) for v in row] for row in matrix]
+    if data_kind != "tcp":
+        if unit == "rad":
+            return matrix
+        return [[math.degrees(v) for v in row] for row in matrix]
+
+    converted = []
+    for row in matrix:
+        xyz = row[:3]
+        abc = row[3:]
+        if linear_unit == "mm":
+            xyz = [v * 1000.0 for v in xyz]
+        if unit == "deg":
+            abc = [math.degrees(v) for v in abc]
+        converted.append(xyz + abc)
+    return converted
 
 
-def signal_unit_label(signal, unit):
+def signal_unit_label(signal, unit, data_kind="joint", linear_unit="m"):
+    if data_kind == "tcp" and signal in TCP_COMPAT_SIGNALS:
+        if signal == "position":
+            return "XYZ {}, ABC {}".format(linear_unit, "deg" if unit == "deg" else "rad")
+        if signal == "velocity":
+            linear = "{}/s".format(linear_unit)
+            angular = "deg/s" if unit == "deg" else "rad/s"
+            return "XYZ {}, ABC {}".format(linear, angular)
+        if signal == "acceleration":
+            linear = "{}/s^2".format(linear_unit)
+            angular = "deg/s^2" if unit == "deg" else "rad/s^2"
+            return "XYZ {}, ABC {}".format(linear, angular)
+
     if signal == "position":
         return "deg" if unit == "deg" else "rad"
     if signal == "velocity":
@@ -156,7 +195,7 @@ def signal_title(signal):
     return "Effort"
 
 
-def build_output_path(base_path, signal, unit, multi_signal, multi_unit):
+def build_output_path(base_path, signal, unit, linear_unit, data_kind, multi_signal, multi_unit, multi_linear):
     base = Path(base_path)
     parent = base.parent
     if parent.name.lower() in {"position", "velocity", "acceleration", "effort"}:
@@ -169,15 +208,18 @@ def build_output_path(base_path, signal, unit, multi_signal, multi_unit):
 
     if signal != "position" and signal not in stem:
         stem = "{}_{}".format(stem, signal)
+    if data_kind == "tcp" and signal in TCP_COMPAT_SIGNALS and multi_linear and linear_unit == "mm":
+        stem = "{}_mm".format(stem)
     if multi_unit and unit == "deg":
         stem = "{}_deg".format(stem)
 
     return signal_dir / (stem + base.suffix)
 
 
-def build_base_figure(matrix, flags, signal, unit):
+def build_base_figure(matrix, flags, signal, unit, data_kind, linear_unit):
     sample_count = len(matrix)
     axis_series = list(zip(*matrix))
+    labels = axis_labels(data_kind)
     flag_ranges = get_flag_ranges(flags)
     start_indices = [i for i, f in enumerate(flags) if f == "start"]
     end_indices = [i for i, f in enumerate(flags) if f == "end"]
@@ -216,7 +258,7 @@ def build_base_figure(matrix, flags, signal, unit):
 
         vline = ax.axvline(0, color="black", linestyle="--", linewidth=1.5, alpha=0.9)
         marker, = ax.plot([0], [series[0]], marker="o", color="black", markersize=4, zorder=5)
-        unit_label = signal_unit_label(signal, unit)
+        unit_label = signal_unit_label(signal, unit, data_kind=data_kind, linear_unit=linear_unit)
         value_text = ax.text(
             0.02,
             0.05,
@@ -230,28 +272,31 @@ def build_base_figure(matrix, flags, signal, unit):
         point_markers.append(marker)
         value_texts.append(value_text)
 
-        ax.set_title("Axis {}".format(axis_idx))
+        ax.set_title(labels[axis_idx - 1])
         ax.grid(True, alpha=0.3)
 
     axes[3].set_xlabel("Point Index")
     axes[4].set_xlabel("Point Index")
     axes[5].set_xlabel("Point Index")
 
-    unit_label = signal_unit_label(signal, unit)
+    unit_label = signal_unit_label(signal, unit, data_kind=data_kind, linear_unit=linear_unit)
     y_label = "{} ({})".format(signal_title(signal), unit_label)
     axes[0].set_ylabel(y_label)
     axes[3].set_ylabel(y_label)
-    fig.suptitle("Manipulator {} Animation ({})".format(signal_title(signal), unit_label))
+    name_prefix = "TCP Pose" if data_kind == "tcp" else "Manipulator"
+    fig.suptitle("{} {} Animation ({})".format(name_prefix, signal_title(signal), unit_label))
     fig.tight_layout(rect=[0, 0, 1, 0.96])
 
     return fig, axis_series, vlines, point_markers, value_texts, unit_label
 
 
-def make_animation(matrix, flags, signal, output_path, unit="rad", fps=20):
+def make_animation(matrix, flags, signal, output_path, unit="rad", fps=20, data_kind="joint", linear_unit="m"):
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    fig, axis_series, vlines, point_markers, value_texts, unit_label = build_base_figure(matrix, flags, signal, unit)
+    fig, axis_series, vlines, point_markers, value_texts, unit_label = build_base_figure(
+        matrix, flags, signal, unit, data_kind, linear_unit
+    )
     sample_count = len(matrix)
 
     def update(frame_idx):
@@ -282,6 +327,8 @@ def main():
     parser.add_argument("--output", default="outputs/GIF/position/manipulator_animation.gif", help="base output GIF path")
     parser.add_argument("--signal", choices=["position", "velocity", "acceleration", "effort", "all"], default="all")
     parser.add_argument("--unit", choices=["rad", "deg", "both"], default="both", help="rad / deg / both")
+    parser.add_argument("--linear-unit", choices=["m", "mm", "both"], default="both", help="linear unit for TCP XYZ")
+    parser.add_argument("--data-type", choices=["auto", "joint", "tcp"], default="auto", help="input data semantics")
     parser.add_argument("--fps", type=int, default=20, help="GIF frame rate")
     parser.add_argument("--dt", type=float, default=0.04, help="sampling interval in seconds for derivative fallback")
     args = parser.parse_args()
@@ -292,6 +339,7 @@ def main():
 
     data = load_trajectory(input_path)
     flags = data["flags"]
+    data_kind = detect_data_kind(input_path, args.data_type)
 
     signals = ["position", "velocity", "acceleration", "effort"] if args.signal == "all" else [args.signal]
     multi_signal = len(signals) > 1
@@ -300,13 +348,18 @@ def main():
         units = ["rad", "deg"] if (signal in ANGULAR_SIGNALS and args.unit == "both") else ["deg" if args.unit == "deg" else "rad"]
         if signal == "effort":
             units = ["rad"]
+        linear_units = ["m"]
+        if data_kind == "tcp" and signal in TCP_COMPAT_SIGNALS:
+            linear_units = ["m", "mm"] if args.linear_unit == "both" else [args.linear_unit]
 
         matrix = resolve_signal_matrix(data, signal, args.dt)
-        for unit in units:
-            converted = convert_unit(matrix, signal, unit)
-            multi_unit = len(units) > 1
-            out_path = build_output_path(args.output, signal, unit, multi_signal, multi_unit)
-            make_animation(converted, flags, signal, out_path, unit, args.fps)
+        for linear_unit in linear_units:
+            for unit in units:
+                converted = convert_unit(matrix, signal, unit, data_kind, linear_unit)
+                multi_unit = len(units) > 1
+                multi_linear = len(linear_units) > 1
+                out_path = build_output_path(args.output, signal, unit, linear_unit, data_kind, multi_signal, multi_unit, multi_linear)
+                make_animation(converted, flags, signal, out_path, unit, args.fps, data_kind=data_kind, linear_unit=linear_unit)
 
 
 if __name__ == "__main__":
