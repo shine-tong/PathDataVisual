@@ -5,8 +5,8 @@
 
 ⚙️ 基于 `matplotlib` 的六轴机器人轨迹可视化工具。
 
-[![Python][b1]][l1] [![Matplotlib][b2]][l2] [![Pillow][b3]][l3]
-[![PNG][b4]][l4] [![GIF][b5]][l5] [![Joint+TCP][b6]][l6]
+[![Python][b1]][l1] [![Matplotlib][b2]][l2] [![Pillow][b3]][l3]<br>
+[![PNG][b4]][l4] [![GIF][b5]][l5] [![Joint+TCP][b6]][l6]<br>
 [![Player][b7]][l7] [![Batch][b8]][l8]
 
 </div>
