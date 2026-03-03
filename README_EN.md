@@ -199,4 +199,3 @@ This is expected. Unit conversion is linear scaling.
 [l7]: ./scripts/player_six_axis.py
 [b8]: https://img.shields.io/badge/Batch-All%20Curves-1ABC9C
 [l8]: ./scripts/generate_all_curves.py
-
